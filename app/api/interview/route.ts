@@ -81,36 +81,40 @@ export async function POST(req: Request) {
       const sheets = google.sheets({ version: "v4", auth })
 
       // Fetch the sheet content
-      const response = await sheets.spreadsheets.values.get({
+      const response = await sheets.spreadsheets.get({
         spreadsheetId: sheetId,
-        range: "A1:Z1000",
+        ranges: [],
+        includeGridData: true,
       })
 
-      const sheetContent = response.data.values
+      const sheetData = response.data.sheets?.[0].data?.[0].rowData
 
-      if (!sheetContent) {
+      if (!sheetData) {
         return NextResponse.json({ error: "Failed to fetch sheet content" }, { status: 400 })
       }
 
-      // Convert sheet content to a string representation
-      const sheetString = sheetContent.map((row) => row.join("\t")).join("\n")
+      // Extract formulas and values
+      const formulasAndValues = sheetData.map((row: any) =>
+        row.values?.map((cell: any) => ({
+          formula: cell.userEnteredValue?.formulaValue,
+          value: cell.formattedValue,
+        })),
+      )
 
-      // Use OpenAI to analyze the answers
+      // Use OpenAI to analyze the formulas
       const prompt = `
-        You are an AI interviewer evaluating a candidate's exam.
-        Below is the content of the exam sheet, where each row is separated by a new line and each cell by a tab:
+        You are an AI evaluator checking the correctness of formulas in a spreadsheet exam.
+        Below is the content of the exam sheet, where each cell contains its formula (if any) and its computed value:
 
-        ${sheetString}
+        ${JSON.stringify(formulasAndValues, null, 2)}
 
-        Analyze the answers and determine if the candidate passed the exam.
-        Provide a clear result (PASS or FAIL) followed by a friendly and encouraging response to the candidate.
-        If they failed, explicitly state that they did not pass, but do not provide specific feedback about why.
-        Keep the response concise and maintain a positive tone throughout.
-        Do not mention specific scores or individual answers.
+        Analyze the formulas and determine if they are correct for their intended purpose.
+        Provide a clear result (PASS or FAIL) followed by a brief explanation.
+        If there are errors, mention which cells have issues without giving away the correct formula.
         
         Format your response as follows:
         RESULT: [PASS/FAIL]
-        MESSAGE: [Your encouraging message here, explicitly stating if they failed]
+        EXPLANATION: [Your brief explanation here]
       `
 
       const completion = await openai.chat.completions.create({
@@ -124,11 +128,11 @@ export async function POST(req: Request) {
         throw new Error("No response from OpenAI")
       }
 
-      const [resultLine, messageLine] = aiResponse.split("\n")
+      const [resultLine, explanationLine] = aiResponse.split("\n")
       const result = resultLine.split(": ")[1]
-      const message = messageLine.split(": ")[1]
+      const explanation = explanationLine.split(": ")[1]
 
-      const finalResponse = `${message} Thank you for participating in this interview process. We appreciate your time and effort. Have a great day!`
+      const finalResponse = `${explanation} Thank you for completing this spreadsheet exam. We appreciate your effort.`
 
       // Convert the AI response to speech
       const { audioContent, error } = await textToSpeech(finalResponse)

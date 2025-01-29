@@ -179,9 +179,7 @@ export default function AIInterviewer() {
       }
 
       // Set a default result message
-      setResultMessage(
-        "Thank you for completing the exam. The interviewer will be in touch with you regarding the next steps.",
-      )
+      setResultMessage("The interviewer will provide feedback on your spreadsheet formulas.")
     } catch (error) {
       console.error("Error checking answers:", error)
       setResultMessage(
@@ -261,7 +259,7 @@ export default function AIInterviewer() {
 
         {stage === "exam" && (
           <div className="flex-1 flex flex-col">
-            <h2 className="text-2xl font-bold mb-4">Candidate Exam</h2>
+            <h2 className="text-2xl font-bold mb-4">Spreadsheet Formula Exam</h2>
             <div className="relative flex-1">
               {isSheetLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-white bg-opacity-75 z-10">
@@ -276,7 +274,10 @@ export default function AIInterviewer() {
               />
             </div>
             <div className="mt-4 text-center">
-              <p>When you're finished, say "submit", "finish", or "done" to complete the exam.</p>
+              <p>
+                Complete the spreadsheet with the correct formulas. When you're finished, say "submit", "finish", or
+                "done" to complete the exam.
+              </p>
             </div>
           </div>
         )}
