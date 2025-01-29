@@ -12,7 +12,6 @@ export default function AIInterviewer() {
   const [isSheetLoading, setIsSheetLoading] = useState(true)
   const [resultMessage, setResultMessage] = useState("")
   const [examResult, setExamResult] = useState<"PASS" | "FAIL" | null>(null)
-  const [feedback, setFeedback] = useState("")
   const [voiceError, setVoiceError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const recognitionRef = useRef<any>(null)
@@ -81,26 +80,17 @@ export default function AIInterviewer() {
         throw new Error("Failed to get audio")
       }
 
-      const { audioBase64, text: speechText, source } = await response.json()
+      const audioBlob = await response.blob()
+      const audioUrl = URL.createObjectURL(audioBlob)
 
-      if (audioBase64 && audioRef.current) {
-        audioRef.current.src = `data:audio/mpeg;base64,${audioBase64}`
+      if (audioRef.current) {
+        audioRef.current.src = audioUrl
         audioRef.current.play()
         audioRef.current.onended = () => {
           console.log("Audio ended. Moving to listening stage.")
           setStage("listening")
           startListening()
         }
-        console.log(`Using ${source} for text-to-speech`)
-      } else {
-        console.warn("No audio received. Falling back to browser's text-to-speech.")
-        const speech = new SpeechSynthesisUtterance(speechText)
-        speech.onend = () => {
-          console.log("Speech ended. Moving to listening stage.")
-          setStage("listening")
-          startListening()
-        }
-        window.speechSynthesis.speak(speech)
       }
     } catch (error) {
       console.error("Error getting audio:", error)
@@ -172,36 +162,32 @@ export default function AIInterviewer() {
         throw new Error("Failed to check answers")
       }
 
-      const { audioBase64, text, source, result, feedback } = await response.json()
-      setResultMessage(text)
-      setExamResult(result as "PASS" | "FAIL")
-      setFeedback(feedback || "")
+      const audioBlob = await response.blob()
+      const audioUrl = URL.createObjectURL(audioBlob)
 
-      if (audioBase64 && audioRef.current) {
-        audioRef.current.src = `data:audio/mpeg;base64,${audioBase64}`
+      // Get the exam result from the response headers
+      const result = response.headers.get("X-Exam-Result")
+      setExamResult(result as "PASS" | "FAIL")
+
+      if (audioRef.current) {
+        audioRef.current.src = audioUrl
         audioRef.current.play()
         audioRef.current.onended = () => {
           console.log("Result audio ended. Moving to result stage.")
           setStage("result")
         }
-        console.log(`Using ${source} for text-to-speech`)
-      } else {
-        console.warn("No audio received. Falling back to browser's text-to-speech.")
-        const speech = new SpeechSynthesisUtterance(text)
-        speech.onend = () => {
-          console.log("Result speech ended. Moving to result stage.")
-          setStage("result")
-        }
-        window.speechSynthesis.speak(speech)
       }
+
+      // Set a default result message
+      setResultMessage(
+        "Thank you for completing the exam. The interviewer will be in touch with you regarding the next steps.",
+      )
     } catch (error) {
       console.error("Error checking answers:", error)
       setResultMessage(
         "We encountered an error while processing your exam. Please contact the interviewer for assistance.",
       )
       setExamResult(null)
-      setFeedback("")
-      setStage("result")
     } finally {
       setIsLoading(false)
     }
@@ -291,21 +277,6 @@ export default function AIInterviewer() {
             </div>
             <div className="mt-4 text-center">
               <p>When you're finished, say "submit", "finish", or "done" to complete the exam.</p>
-              <div className="flex items-center justify-center mt-2">
-                <Button onClick={submitExam} disabled={isLoading} className="mr-2">
-                  {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  {isLoading ? "Submitting..." : "Submit Exam"}
-                </Button>
-                {isListening ? (
-                  <Button onClick={stopListening} variant="outline">
-                    Stop Listening
-                  </Button>
-                ) : (
-                  <Button onClick={startListening} variant="outline">
-                    Start Listening
-                  </Button>
-                )}
-              </div>
             </div>
           </div>
         )}
@@ -335,23 +306,12 @@ export default function AIInterviewer() {
                   {examResult}
                 </span>
               </p>
-              {examResult === "FAIL" && (
-                <p className="text-red-500 mb-4">Unfortunately, you did not pass the exam this time.</p>
-              )}
               <p className="text-lg mb-4">{resultMessage}</p>
-              {feedback && (
-                <div className="mt-4 p-4 bg-gray-100 rounded-lg">
-                  <h3 className="font-bold mb-2">Feedback:</h3>
-                  <p>{feedback}</p>
-                </div>
-              )}
               <p className="mt-4">Thank you for participating in this interview process.</p>
-              {examResult === "FAIL" && (
-                <p className="mt-4 text-sm text-gray-600">
-                  If you have any questions about your result or would like more detailed feedback on your performance,
-                  please contact our HR department for more information.
-                </p>
-              )}
+              <p className="mt-4 text-sm text-gray-600">
+                If you have any questions about your result or would like more information, please contact our HR
+                department.
+              </p>
             </div>
           </div>
         )}

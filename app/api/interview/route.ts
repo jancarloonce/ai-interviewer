@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server"
-import { google } from "googleapis"
 import OpenAI from "openai"
 import axios from "axios"
-import { TextToSpeechClient } from "@google-cloud/text-to-speech"
+import { google } from "googleapis"
 
-const GOOGLE_SERVICE_ACCOUNT_KEY = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY || "{}")
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ""
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || ""
+const GOOGLE_SERVICE_ACCOUNT_KEY = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || ""
 
 if (!OPENAI_API_KEY) {
   console.error("OpenAI API key is not set. Please check your .env.local file.")
@@ -16,13 +15,13 @@ if (!ELEVENLABS_API_KEY) {
   console.error("ElevenLabs API key is not set. Please check your .env.local file.")
 }
 
+if (!GOOGLE_SERVICE_ACCOUNT_KEY) {
+  console.error("Google Service Account key is not set. Please check your .env.local file.")
+}
+
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
 
-// Initialize Google Cloud Text-to-Speech client
-const googleTTSClient = new TextToSpeechClient({ credentials: GOOGLE_SERVICE_ACCOUNT_KEY })
-
-async function textToSpeech(text: string): Promise<{ audioBase64: string | null; source: string }> {
-  // Try ElevenLabs first
+async function textToSpeech(text: string): Promise<{ audioContent: ArrayBuffer | null; error?: string }> {
   try {
     const response = await axios({
       method: "POST",
@@ -43,28 +42,11 @@ async function textToSpeech(text: string): Promise<{ audioBase64: string | null;
       responseType: "arraybuffer",
     })
 
-    return { audioBase64: Buffer.from(response.data).toString("base64"), source: "elevenlabs" }
+    return { audioContent: response.data }
   } catch (error) {
     console.error("Error in ElevenLabs textToSpeech:", error)
+    return { audioContent: null, error: "Failed to generate speech" }
   }
-
-  // If ElevenLabs fails, try Google Cloud Text-to-Speech
-  try {
-    const [googleResponse] = await googleTTSClient.synthesizeSpeech({
-      input: { text },
-      voice: { languageCode: "en-US", ssmlGender: "FEMALE" },
-      audioConfig: { audioEncoding: "MP3" },
-    })
-
-    if (googleResponse.audioContent) {
-      return { audioBase64: googleResponse.audioContent.toString("base64"), source: "google" }
-    }
-  } catch (error) {
-    console.error("Error in Google Cloud textToSpeech:", error)
-  }
-
-  // If both fail, return null
-  return { audioBase64: null, source: "none" }
 }
 
 export async function POST(req: Request) {
@@ -74,8 +56,17 @@ export async function POST(req: Request) {
     const speechText =
       text ||
       "Hello! I'm your AI interviewer from Activate Talent. It's great to meet you today. I hope you're doing well. Are you ready to take the exam? Please respond with yes when you're ready."
-    const { audioBase64, source } = await textToSpeech(speechText)
-    return NextResponse.json({ audioBase64, text: speechText, source })
+    const { audioContent, error } = await textToSpeech(speechText)
+
+    if (error) {
+      return NextResponse.json({ error }, { status: 500 })
+    }
+
+    return new NextResponse(audioContent, {
+      headers: {
+        "Content-Type": "audio/mpeg",
+      },
+    })
   }
 
   if (action === "checkAnswers") {
@@ -84,7 +75,7 @@ export async function POST(req: Request) {
     try {
       // Authenticate with Google Sheets API
       const auth = new google.auth.GoogleAuth({
-        credentials: GOOGLE_SERVICE_ACCOUNT_KEY,
+        credentials: JSON.parse(GOOGLE_SERVICE_ACCOUNT_KEY),
         scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
       })
       const sheets = google.sheets({ version: "v4", auth })
@@ -113,14 +104,13 @@ export async function POST(req: Request) {
 
         Analyze the answers and determine if the candidate passed the exam.
         Provide a clear result (PASS or FAIL) followed by a friendly and encouraging response to the candidate.
-        If they failed, include a brief 2-sentence explanation of why they didn't pass and what the correct approach or answer should have been.
+        If they failed, explicitly state that they did not pass, but do not provide specific feedback about why.
         Keep the response concise and maintain a positive tone throughout.
         Do not mention specific scores or individual answers.
         
         Format your response as follows:
         RESULT: [PASS/FAIL]
-        MESSAGE: [Your encouraging message here]
-        FEEDBACK: [Only if FAIL: Brief 2-sentence explanation of why they didn't pass and what the correct approach or answer should have been]
+        MESSAGE: [Your encouraging message here, explicitly stating if they failed]
       `
 
       const completion = await openai.chat.completions.create({
@@ -134,17 +124,26 @@ export async function POST(req: Request) {
         throw new Error("No response from OpenAI")
       }
 
-      const [resultLine, messageLine, feedbackLine] = aiResponse.split("\n")
+      const [resultLine, messageLine] = aiResponse.split("\n")
       const result = resultLine.split(": ")[1]
       const message = messageLine.split(": ")[1]
-      const feedback = feedbackLine?.split(": ")[1] || ""
 
-      const finalResponse = `${message} ${feedback} Thank you for participating in this interview process. We appreciate your time and effort. Have a great day!`
+      const finalResponse = `${message} Thank you for participating in this interview process. We appreciate your time and effort. Have a great day!`
 
       // Convert the AI response to speech
-      const { audioBase64, source } = await textToSpeech(finalResponse)
+      const { audioContent, error } = await textToSpeech(finalResponse)
 
-      return NextResponse.json({ audioBase64, text: finalResponse, source, result, feedback })
+      if (error) {
+        return NextResponse.json({ error }, { status: 500 })
+      }
+
+      // Add result to response headers
+      const headers = new Headers({
+        "Content-Type": "audio/mpeg",
+        "X-Exam-Result": result,
+      })
+
+      return new NextResponse(audioContent, { headers })
     } catch (error: any) {
       console.error("Error:", error)
       return NextResponse.json(
