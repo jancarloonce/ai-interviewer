@@ -2,14 +2,18 @@
 
 import React, { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
-import { Loader2, Mic } from "lucide-react"
+import { Loader2, Mic, CheckCircle, XCircle } from "lucide-react"
 import Image from "next/image"
 
 export default function AIInterviewer() {
-  const [stage, setStage] = useState<"initial" | "greeting" | "listening" | "exam" | "result">("initial")
+  const [stage, setStage] = useState<"initial" | "greeting" | "listening" | "exam" | "submitting" | "result">("initial")
   const [isLoading, setIsLoading] = useState(false)
   const [isListening, setIsListening] = useState(false)
   const [isSheetLoading, setIsSheetLoading] = useState(true)
+  const [resultMessage, setResultMessage] = useState("")
+  const [examResult, setExamResult] = useState<"PASS" | "FAIL" | null>(null)
+  const [feedback, setFeedback] = useState("")
+  const [voiceError, setVoiceError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const recognitionRef = useRef<any>(null)
 
@@ -17,22 +21,31 @@ export default function AIInterviewer() {
     if (typeof window !== "undefined" && ("SpeechRecognition" in window || "webkitSpeechRecognition" in window)) {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
       recognitionRef.current = new SpeechRecognition()
-      recognitionRef.current.continuous = false
-      recognitionRef.current.lang = "en-US"
+      recognitionRef.current.continuous = true
       recognitionRef.current.interimResults = false
-      recognitionRef.current.maxAlternatives = 1
+      recognitionRef.current.lang = "en-US"
+
+      recognitionRef.current.onstart = () => {
+        console.log("Speech recognition started")
+        setIsListening(true)
+      }
 
       recognitionRef.current.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript.toLowerCase()
+        const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase()
         console.log("Speech recognized:", transcript)
-        if (transcript.includes("yes") || transcript.includes("ready")) {
-          console.log("User is ready. Moving to exam stage.")
-          setStage("exam")
-        } else {
-          console.log("User is not ready. Asking again.")
-          playAudio("I'm sorry, I didn't catch that. Please say yes when you're ready to begin the exam.")
+        if (stage === "greeting" || stage === "listening") {
+          if (transcript.includes("yes") || transcript.includes("ready")) {
+            console.log("User is ready. Moving to exam stage.")
+            stopListening()
+            setStage("exam")
+          }
+        } else if (stage === "exam") {
+          if (transcript.includes("submit") || transcript.includes("finish") || transcript.includes("done")) {
+            console.log("User wants to submit the exam.")
+            stopListening()
+            submitExam()
+          }
         }
-        setIsListening(false)
       }
 
       recognitionRef.current.onerror = (event: any) => {
@@ -43,45 +56,58 @@ export default function AIInterviewer() {
       recognitionRef.current.onend = () => {
         console.log("Speech recognition ended")
         setIsListening(false)
+        if (stage === "greeting" || stage === "listening" || stage === "exam") {
+          startListening()
+        }
       }
     } else {
       console.error("Speech recognition not supported in this browser")
     }
-  }, [])
+  }, [stage])
 
-  const playAudio = (text: string) => {
+  const playAudio = async (text: string) => {
     console.log("Playing audio:", text)
     setIsLoading(true)
-    fetch("/api/interview", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ action: "greeting", text }),
-    })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Failed to get audio")
+    try {
+      const response = await fetch("/api/interview", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "speak", text }),
+      })
+
+      if (!response.ok) {
+        throw new Error("Failed to get audio")
+      }
+
+      const { audioBase64, text: speechText, source } = await response.json()
+
+      if (audioBase64 && audioRef.current) {
+        audioRef.current.src = `data:audio/mpeg;base64,${audioBase64}`
+        audioRef.current.play()
+        audioRef.current.onended = () => {
+          console.log("Audio ended. Moving to listening stage.")
+          setStage("listening")
+          startListening()
         }
-        return response.json()
-      })
-      .then(({ audioBase64 }) => {
-        if (audioRef.current) {
-          audioRef.current.src = `data:audio/mpeg;base64,${audioBase64}`
-          audioRef.current.play()
-          audioRef.current.onended = () => {
-            console.log("Audio ended. Moving to listening stage.")
-            setStage("listening")
-            startListening()
-          }
+        console.log(`Using ${source} for text-to-speech`)
+      } else {
+        console.warn("No audio received. Falling back to browser's text-to-speech.")
+        const speech = new SpeechSynthesisUtterance(speechText)
+        speech.onend = () => {
+          console.log("Speech ended. Moving to listening stage.")
+          setStage("listening")
+          startListening()
         }
-      })
-      .catch((error) => {
-        console.error("Error getting audio:", error)
-      })
-      .finally(() => {
-        setIsLoading(false)
-      })
+        window.speechSynthesis.speak(speech)
+      }
+    } catch (error) {
+      console.error("Error getting audio:", error)
+      setVoiceError("Failed to get audio. Please try again or contact support.")
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   const startExam = () => {
@@ -93,11 +119,15 @@ export default function AIInterviewer() {
   }
 
   const startListening = () => {
+    if (isListening) {
+      console.log("Already listening, no need to start again")
+      return
+    }
     console.log("Starting listening")
-    setIsListening(true)
     if (recognitionRef.current) {
       try {
         recognitionRef.current.start()
+        setIsListening(true)
       } catch (error) {
         console.error("Error starting speech recognition:", error)
         setIsListening(false)
@@ -108,61 +138,115 @@ export default function AIInterviewer() {
     }
   }
 
-  const submitExam = () => {
+  const stopListening = () => {
+    if (!isListening) {
+      console.log("Not listening, no need to stop")
+      return
+    }
+    console.log("Stopping listening")
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop()
+        setIsListening(false)
+      } catch (error) {
+        console.error("Error stopping speech recognition:", error)
+      }
+    }
+  }
+
+  const submitExam = async () => {
     console.log("Submitting exam")
     setIsLoading(true)
-    fetch("/api/interview", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ action: "checkAnswers" }),
-    })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error("Failed to check answers")
+    setStage("submitting")
+    stopListening()
+    try {
+      const response = await fetch("/api/interview", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "checkAnswers" }),
+      })
+
+      if (!response.ok) {
+        throw new Error("Failed to check answers")
+      }
+
+      const { audioBase64, text, source, result, feedback } = await response.json()
+      setResultMessage(text)
+      setExamResult(result as "PASS" | "FAIL")
+      setFeedback(feedback || "")
+
+      if (audioBase64 && audioRef.current) {
+        audioRef.current.src = `data:audio/mpeg;base64,${audioBase64}`
+        audioRef.current.play()
+        audioRef.current.onended = () => {
+          console.log("Result audio ended. Moving to result stage.")
+          setStage("result")
         }
-        return response.json()
-      })
-      .then(({ audioBase64 }) => {
-        if (audioRef.current) {
-          audioRef.current.src = `data:audio/mpeg;base64,${audioBase64}`
-          audioRef.current.play()
-          audioRef.current.onended = () => {
-            console.log("Result audio ended. Moving to result stage.")
-            setStage("result")
-          }
+        console.log(`Using ${source} for text-to-speech`)
+      } else {
+        console.warn("No audio received. Falling back to browser's text-to-speech.")
+        const speech = new SpeechSynthesisUtterance(text)
+        speech.onend = () => {
+          console.log("Result speech ended. Moving to result stage.")
+          setStage("result")
         }
-      })
-      .catch((error) => {
-        console.error("Error checking answers:", error)
-      })
-      .finally(() => {
-        setIsLoading(false)
-      })
+        window.speechSynthesis.speak(speech)
+      }
+    } catch (error) {
+      console.error("Error checking answers:", error)
+      setResultMessage(
+        "We encountered an error while processing your exam. Please contact the interviewer for assistance.",
+      )
+      setExamResult(null)
+      setFeedback("")
+      setStage("result")
+    } finally {
+      setIsLoading(false)
+    }
   }
+
+  useEffect(() => {
+    if (stage === "exam") {
+      startListening()
+    }
+    return () => {
+      if (stage !== "exam") {
+        stopListening()
+      }
+    }
+  }, [stage, startListening]) // Added startListening to dependencies
 
   return (
     <div className="flex h-screen">
       {/* Left side - AI Avatar */}
       <div className="w-1/3 p-4 flex flex-col items-center justify-center bg-gray-100">
-        <div className="relative w-64 h-64 mb-4">
-          <Image src="/placeholder.svg" alt="AI Avatar" layout="fill" objectFit="cover" className="rounded-full" />
+        <div className="w-64 h-64 mb-4 relative">
+          <Image src="/june.png" alt="AI Avatar" width={256} height={256} className="rounded-full object-cover" />
         </div>
         <h2 className="text-2xl font-bold mb-4">AI Interviewer</h2>
+        {voiceError && (
+          <div className="mt-4 p-2 bg-yellow-100 border border-yellow-400 text-yellow-700 rounded">
+            <p>{voiceError}</p>
+          </div>
+        )}
         {stage === "initial" && (
           <Button onClick={startExam} disabled={isLoading}>
             {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
             {isLoading ? "Starting..." : "Start Interview"}
           </Button>
         )}
-        {stage === "listening" && (
+        {(stage === "listening" || stage === "exam") && (
           <div className="flex items-center">
-            <p className="mr-2">Listening:</p>
+            <p className="mr-2">Status:</p>
             {isListening ? (
-              <Mic className="h-8 w-8 text-green-500 animate-pulse" />
+              <div className="flex items-center">
+                <Mic className="h-6 w-6 text-green-500 mr-2" />
+                <span className="text-green-500">Listening</span>
+              </div>
             ) : (
-              <Button onClick={startListening}>Speak</Button>
+              <span className="text-gray-500">Waiting for voice input</span>
             )}
           </div>
         )}
@@ -179,6 +263,7 @@ export default function AIInterviewer() {
         {stage === "greeting" && (
           <div className="flex-1 flex items-center justify-center">
             <h2 className="text-2xl font-bold">AI Interviewer is speaking</h2>
+            {isLoading && <Loader2 className="ml-2 h-6 w-6 animate-spin" />}
           </div>
         )}
 
@@ -204,18 +289,69 @@ export default function AIInterviewer() {
                 onLoad={() => setIsSheetLoading(false)}
               />
             </div>
-            <Button onClick={submitExam} disabled={isLoading} className="mt-4">
-              {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-              {isLoading ? "Submitting..." : "Submit Exam"}
-            </Button>
+            <div className="mt-4 text-center">
+              <p>When you're finished, say "submit", "finish", or "done" to complete the exam.</p>
+              <div className="flex items-center justify-center mt-2">
+                <Button onClick={submitExam} disabled={isLoading} className="mr-2">
+                  {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  {isLoading ? "Submitting..." : "Submit Exam"}
+                </Button>
+                {isListening ? (
+                  <Button onClick={stopListening} variant="outline">
+                    Stop Listening
+                  </Button>
+                ) : (
+                  <Button onClick={startListening} variant="outline">
+                    Start Listening
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {stage === "submitting" && (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center">
+              <Loader2 className="h-12 w-12 animate-spin mx-auto mb-4" />
+              <h2 className="text-2xl font-bold">Processing Your Exam</h2>
+              <p className="mt-2">Please wait while we analyze your responses...</p>
+            </div>
           </div>
         )}
 
         {stage === "result" && (
           <div className="flex-1 flex items-center justify-center">
-            <div>
-              <h2 className="text-2xl font-bold mb-4">Thank you for completing the exam</h2>
-              <p>The interview is now over. You may close this window.</p>
+            <div className="text-center max-w-md">
+              {examResult === "PASS" ? (
+                <CheckCircle className="h-16 w-16 text-green-500 mx-auto mb-4" />
+              ) : (
+                <XCircle className="h-16 w-16 text-red-500 mx-auto mb-4" />
+              )}
+              <h2 className="text-2xl font-bold mb-4">Exam Completed</h2>
+              <p className="text-lg mb-2">
+                Result:{" "}
+                <span className={examResult === "PASS" ? "text-green-500 font-bold" : "text-red-500 font-bold"}>
+                  {examResult}
+                </span>
+              </p>
+              {examResult === "FAIL" && (
+                <p className="text-red-500 mb-4">Unfortunately, you did not pass the exam this time.</p>
+              )}
+              <p className="text-lg mb-4">{resultMessage}</p>
+              {feedback && (
+                <div className="mt-4 p-4 bg-gray-100 rounded-lg">
+                  <h3 className="font-bold mb-2">Feedback:</h3>
+                  <p>{feedback}</p>
+                </div>
+              )}
+              <p className="mt-4">Thank you for participating in this interview process.</p>
+              {examResult === "FAIL" && (
+                <p className="mt-4 text-sm text-gray-600">
+                  If you have any questions about your result or would like more detailed feedback on your performance,
+                  please contact our HR department for more information.
+                </p>
+              )}
             </div>
           </div>
         )}

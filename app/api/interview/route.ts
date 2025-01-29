@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { google } from "googleapis"
 import OpenAI from "openai"
 import axios from "axios"
+import { TextToSpeechClient } from "@google-cloud/text-to-speech"
 
 const GOOGLE_SERVICE_ACCOUNT_KEY = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY || "{}")
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ""
@@ -17,38 +18,64 @@ if (!ELEVENLABS_API_KEY) {
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY })
 
-async function textToSpeech(text: string): Promise<Buffer> {
-  const response = await axios({
-    method: "POST",
-    url: "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
-    headers: {
-      Accept: "audio/mpeg",
-      "xi-api-key": ELEVENLABS_API_KEY,
-      "Content-Type": "application/json",
-    },
-    data: {
-      text,
-      model_id: "eleven_monolingual_v1",
-      voice_settings: {
-        stability: 0.5,
-        similarity_boost: 0.5,
-      },
-    },
-    responseType: "arraybuffer",
-  })
+// Initialize Google Cloud Text-to-Speech client
+const googleTTSClient = new TextToSpeechClient({ credentials: GOOGLE_SERVICE_ACCOUNT_KEY })
 
-  return response.data
+async function textToSpeech(text: string): Promise<{ audioBase64: string | null; source: string }> {
+  // Try ElevenLabs first
+  try {
+    const response = await axios({
+      method: "POST",
+      url: "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM",
+      headers: {
+        Accept: "audio/mpeg",
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      data: {
+        text,
+        model_id: "eleven_monolingual_v1",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.5,
+        },
+      },
+      responseType: "arraybuffer",
+    })
+
+    return { audioBase64: Buffer.from(response.data).toString("base64"), source: "elevenlabs" }
+  } catch (error) {
+    console.error("Error in ElevenLabs textToSpeech:", error)
+  }
+
+  // If ElevenLabs fails, try Google Cloud Text-to-Speech
+  try {
+    const [googleResponse] = await googleTTSClient.synthesizeSpeech({
+      input: { text },
+      voice: { languageCode: "en-US", ssmlGender: "FEMALE" },
+      audioConfig: { audioEncoding: "MP3" },
+    })
+
+    if (googleResponse.audioContent) {
+      return { audioBase64: googleResponse.audioContent.toString("base64"), source: "google" }
+    }
+  } catch (error) {
+    console.error("Error in Google Cloud textToSpeech:", error)
+  }
+
+  // If both fail, return null
+  return { audioBase64: null, source: "none" }
 }
 
 export async function POST(req: Request) {
-  const { action } = await req.json()
+  const { action, text } = await req.json()
 
-  if (action === "greeting") {
-    const greetingText =
+  if (action === "greeting" || action === "speak") {
+    const speechText =
+      text ||
       "Hello! I'm your AI interviewer from Activate Talent. It's great to meet you today. I hope you're doing well. Are you ready to take the exam? Please respond with yes when you're ready."
-    const audioBuffer = await textToSpeech(greetingText)
-    const audioBase64 = Buffer.from(audioBuffer).toString("base64")
-    return NextResponse.json({ audioBase64 })
+    const { audioBase64, source } = await textToSpeech(speechText)
+    return NextResponse.json({ audioBase64, text: speechText, source })
   }
 
   if (action === "checkAnswers") {
@@ -85,8 +112,15 @@ export async function POST(req: Request) {
         ${sheetString}
 
         Analyze the answers and determine if the candidate passed the exam.
-        Provide a brief response stating whether the candidate passed or not.
-        Do not explain the answers or provide details about correct or incorrect responses.
+        Provide a clear result (PASS or FAIL) followed by a friendly and encouraging response to the candidate.
+        If they failed, include a brief 2-sentence explanation of why they didn't pass and what the correct approach or answer should have been.
+        Keep the response concise and maintain a positive tone throughout.
+        Do not mention specific scores or individual answers.
+        
+        Format your response as follows:
+        RESULT: [PASS/FAIL]
+        MESSAGE: [Your encouraging message here]
+        FEEDBACK: [Only if FAIL: Brief 2-sentence explanation of why they didn't pass and what the correct approach or answer should have been]
       `
 
       const completion = await openai.chat.completions.create({
@@ -100,14 +134,17 @@ export async function POST(req: Request) {
         throw new Error("No response from OpenAI")
       }
 
-      // Convert the AI response to speech
-      const audioBuffer = await textToSpeech(
-        aiResponse +
-          " Thank you for taking the time to complete this exam. The interview is now over. Have a great day!",
-      )
-      const audioBase64 = Buffer.from(audioBuffer).toString("base64")
+      const [resultLine, messageLine, feedbackLine] = aiResponse.split("\n")
+      const result = resultLine.split(": ")[1]
+      const message = messageLine.split(": ")[1]
+      const feedback = feedbackLine?.split(": ")[1] || ""
 
-      return NextResponse.json({ audioBase64 })
+      const finalResponse = `${message} ${feedback} Thank you for participating in this interview process. We appreciate your time and effort. Have a great day!`
+
+      // Convert the AI response to speech
+      const { audioBase64, source } = await textToSpeech(finalResponse)
+
+      return NextResponse.json({ audioBase64, text: finalResponse, source, result, feedback })
     } catch (error: any) {
       console.error("Error:", error)
       return NextResponse.json(
