@@ -1,4 +1,6 @@
-import AIInterviewer from "./components/AIInterviewer"
+import dynamic from "next/dynamic"
+
+const AIInterviewer = dynamic(() => import("./components/AIInterviewer"), { ssr: false })
 
 export default function Home() {
   return (
